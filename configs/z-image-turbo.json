@@ -1,0 +1,9 @@
+{
+  "block_name": "layers",
+  "rules": [
+    { "policy": "keep", "match": [] },
+    { "policy": "float8_e4m3fn",  "match": [] },
+    { "policy": "nvfp4","match": [ "adaLN_modulation.0", "attention.out", "attention.qkv", "feed_forward" ] }
+  ],
+  "fp8_auto_fallback": { "enable": false }
+}

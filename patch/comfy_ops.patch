@@ -1,0 +1,44 @@
+diff --git a/comfy/ops.py b/comfy/ops.py
+index 415c39e9..d3620a84 100644
+--- a/comfy/ops.py
++++ b/comfy/ops.py
+@@ -23,6 +23,7 @@ from comfy.cli_args import args, PerformanceFeature
+ import comfy.float
+ import comfy.rmsnorm
+ import json
++from extra.calibration import record_amax_from_tensor
+ 
+ def run_every_op():
+     if torch.compiler.is_compiling():
+@@ -492,7 +493,6 @@ from .quant_ops import (
+     get_layout_class,
+ )
+ 
+-
+ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_precision_mm=False, disabled=[]):
+     class MixedPrecisionOps(manual_cast):
+         _quant_config = quant_config
+@@ -543,6 +543,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
+ 
+                 device = self.factory_kwargs["device"]
+                 layer_name = prefix.rstrip('.')
++                self._layer_name = layer_name # calib
+                 weight_key = f"{prefix}weight"
+                 weight = state_dict.pop(weight_key, None)
+                 if weight is None:
+@@ -571,6 +572,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
+ 
+                     qconfig = QUANT_ALGOS[self.quant_format]
+                     self.layout_type = qconfig["comfy_tensor_layout"]
++
+                     layout_cls = get_layout_class(self.layout_type)
+ 
+                     # Load format-specific parameters
+@@ -680,6 +682,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
+                         scale = getattr(self, 'input_scale', None)
+                         if scale is not None:
+                             scale = comfy.model_management.cast_to_device(scale, input.device, None)
++                        record_amax_from_tensor(self._layer_name, getattr(self, "quant_format", None), input_reshaped) # calib
+                         input = QuantizedTensor.from_float(input_reshaped, self.layout_type, scale=scale)
+ 
+                 output = self.forward_comfy_cast_weights(input)
