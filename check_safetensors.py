@@ -17,7 +17,7 @@ with safe_open(sys.argv[1], framework="pt") as f:
     for key in f.keys():
         tensor_slice = f.get_slice(key)
         tensor = f.get_tensor(key)
-        print(f"{key}: {tensor_slice.get_shape()}: {tensor_slice.get_dtype()}", end=" ")
+        print(f"[{key:<40}] {str(tensor_slice.get_shape()):<20} {tensor_slice.get_dtype()}", end=" ")
         if any(word in key for word in target_keywords) and tensor.numel() == 1:
             print(f"{tensor.item():.12f}")
         elif tensor.dim() == 1 and 'comfy_quant' in key:

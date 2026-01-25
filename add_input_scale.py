@@ -6,6 +6,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 FP4_MAX = 6.0  # E2M1 max (common FP4 range assumption)
+CALIBRATION_MARGIN = 1.0
 
 def _quant_format_from_dtype(dt) -> str:
     s = str(dt).upper()
@@ -17,22 +18,35 @@ def _quant_format_from_dtype(dt) -> str:
         return "float8_e5m2"
     return ""  # unsupported
 
-def _input_scale_from_format(qfmt: str, amax: float) -> float:
+def _input_scale_from_format(qfmt: str, value: float) -> float:
+    value = value * CALIBRATION_MARGIN
     if qfmt == "nvfp4":
         fp8_max = float(torch.finfo(torch.float8_e4m3fn).max)
-        return amax / (fp8_max * FP4_MAX)
+        return value / (fp8_max * FP4_MAX)
 
     if qfmt in ("float8_e4m3fn", "float8_e5m2"):
         fp8_dt = torch.float8_e4m3fn if qfmt == "float8_e4m3fn" else torch.float8_e5m2
         fp8_max = float(torch.finfo(fp8_dt).max)
-        return amax / fp8_max
+        return value / fp8_max
 
     raise ValueError(f"unsupported quant format: {qfmt}")
 
+def parse_detailed_format(layers, key):
+    data = {}
+    for layer_bin, stats in layers.items():
+        if "_bin0" not in layer_bin:
+            continue
+        layer_name = layer_bin.replace("_bin0", "")
+        data[layer_name] = stats[key]
+    return data
 
 def main():
     json_path, input_path, output_path = sys.argv[1:4]
-    amax_map = json.load(open(json_path, "r", encoding="utf-8"))
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if "layers" in data:
+        data =  parse_detailed_format(data["layers"], "amax")
 
     out_tensors = {}
 
@@ -42,7 +56,7 @@ def main():
         for k in f.keys():
             out_tensors[k] = f.get_tensor(k)
 
-        for layer_name, amax in amax_map.items():
+        for layer_name, value in data.items():
             weight_key = f"{layer_name}.weight"
             dt = f.get_slice(weight_key).get_dtype()
 
@@ -50,7 +64,7 @@ def main():
             if not qfmt:
                 continue
 
-            input_scale = _input_scale_from_format(qfmt, float(amax))
+            input_scale = _input_scale_from_format(qfmt, float(value))
             out_tensors[f"{layer_name}.input_scale"] = torch.tensor(input_scale, dtype=torch.float32)
 
             scale_key = f"{layer_name}.weight_scale_2" if qfmt == "nvfp4" else f"{layer_name}.weight_scale"

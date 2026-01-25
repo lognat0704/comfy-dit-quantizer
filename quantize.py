@@ -1,19 +1,17 @@
 import argparse
 import json
+import os
 import torch
 import comfy_kitchen as ck
+from comfy_kitchen.float_utils import F8_E4M3_MAX, F4_E2M1_MAX
 from safetensors.torch import load_file, save_file
+import utils
+from utils import print_layer_metrics, print_layer_header
 
 QUANTIZABLE_WEIGHT_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
 ALLOWED_QTYPES = {"float8_e4m3fn", "nvfp4"}
 
-device = torch.device('cpu')
-if torch.cuda.is_available():
-    device = torch.device('cuda')
-elif torch.backends.mps.is_available():
-    device = torch.device('mps')
-elif torch.xpu.is_available():  # Intel GPU
-    device = torch.device('xpu')
+device = utils.get_device()
 
 
 def parse_args():
@@ -22,35 +20,38 @@ def parse_args():
         description="Quantize safetensors weights with rule-based policies.",
     )
     p.add_argument("json", help="Quant config JSON path")
-    p.add_argument("src", help="Source safetensors path")
+    p.add_argument("src", nargs="*", help="Source safetensors path")
     p.add_argument("dst", help="Target safetensors path")
+    p.add_argument("-d", "--downcast-fp32", choices=("fp16", "bf16"), default=None, metavar="{fp16,bf16}",
+                   help="Cast fp32 tensors to the selected dtype (default: keep FP32).")
+    p.add_argument("-m", "--method", choices=("amax", "mse"), default="mse", metavar="{amax, mse}",
+                   help="Set calibration method (default: mse).")
+    p.add_argument("-n", "--n-samples", default=None, type=int, help="num of samples for calibration method")
+    p.add_argument("-q", "--quiet", action="store_true", help="no verbose.")
+    p.add_argument("-t", "--test", action="store_true", help="does not save output")
     return p.parse_args()
 
-def get_metrics(original, quantized, global_scale, block_scales=None):
-    if block_scales is not None and quantized.dtype == torch.uint8:
-        dequantized = ck.dequantize_nvfp4(quantized, global_scale, block_scales, original.dtype) # nvfp4
-    else: 
-        dequantized = ck.dequantize_per_tensor_fp8(quantized, global_scale, original.dtype) # fp8
-    mse = torch.mean((original - dequantized)**2)
-    mae = torch.mean(torch.abs(original - dequantized))
-    max_err = torch.max(torch.abs(original - dequantized))  # Max Error
-    rel_max_err = (max_err / (original.abs().amax() + 1e-8)).item() * 100  # Relative (%)
-    return mse, mae, max_err, rel_max_err
-
-def quantize_layer(tensor, key, quantized_state_dict, quantization_layers, qtype, qformat):
+def quantize_weight(weight, key, quantized_state_dict, quantization_layers, qtype, qformat, method, n_samples, verbose=True):
     layer_name = key.replace(".weight", "")
-    amax = torch.amax(tensor.abs()).to(torch.float32)
     
     if qtype == "nvfp4":
-        weight_scale_2 = amax / (ck.float_utils.F8_E4M3_MAX * ck.float_utils.F4_E2M1_MAX)
+        if method == "mse":
+            weight_scale_2 = utils.scale_mse_nvfp4(weight, n_samples=n_samples)
+        else:
+            weight_scale_2 = utils.scale_amax_nvfp4(weight)
         with ck.use_backend("triton"): # triton supports conversion from fp32
-            weight_quantized, weight_scale = ck.quantize_nvfp4(tensor, weight_scale_2, epsilon=1e-6)
+            weight_quantized, weight_scale = ck.quantize_nvfp4(weight, weight_scale_2)
+        if verbose: print_layer_metrics(layer_name, weight, weight_quantized, weight_scale_2, weight_scale)
         quantized_state_dict[key] = weight_quantized.cpu()
         quantized_state_dict[f"{layer_name}.weight_scale"] = weight_scale.cpu()
         quantized_state_dict[f"{layer_name}.weight_scale_2"] = weight_scale_2.cpu()
     else: # fp8
-        weight_scale = amax / ck.float_utils.F8_E4M3_MAX
-        weight_quantized = ck.quantize_per_tensor_fp8(tensor, weight_scale)
+        if method == "mse":
+            weight_scale = utils.scale_mse_fp8(weight, n_samples=n_samples)
+        else:
+            weight_scale = utils.scale_amax_fp8(weight)
+        weight_quantized = ck.quantize_per_tensor_fp8(weight, weight_scale)
+        if verbose: print_layer_metrics(layer_name, weight, weight_quantized, weight_scale)
         quantized_state_dict[key] = weight_quantized.cpu()
         quantized_state_dict[f"{layer_name}.weight_scale"] = weight_scale.cpu()
 
@@ -60,15 +61,16 @@ def quantize_layer(tensor, key, quantized_state_dict, quantization_layers, qtype
     else: # 1.0
         quantization_layers[layer_name] = {"format": qtype}
 
-    if qtype == "nvfp4":
-        fmt = "nvfp4"
-        mse, mae, max_err, rel_max_err = get_metrics(tensor, weight_quantized, weight_scale_2, weight_scale)
-        tail = f"global_scale={weight_scale_2:.8f} mse={mse:.6f} mae:{mae:.6f} max_err:{max_err:.6f} rel:{rel_max_err:.2f}"
-    else:  # fp8
-        fmt = "fp8"
-        mse, mae, max_err, rel_max_err = get_metrics(tensor, weight_quantized, weight_scale)
-        tail = f"global_scale={weight_scale:.8f} mse={mse:.6f} mae:{mae:.6f} max_err:{max_err:.6f} rel:{rel_max_err:.2f}"
-    print(f"[{layer_name.partition('.')[2][:20]:<20} {fmt:>5}] amax:{amax.item():.4f}", tail)
+def store_with_optional_downcast(tensor, key, quantized_state_dict, cast_to, verbose=True):
+    if tensor.dtype == torch.float32 and cast_to != None:
+        casted_weight = tensor.to(dtype=cast_to)
+        quantized_state_dict[key] = casted_weight.cpu()
+
+        if verbose and ".weight" in key:
+            layer_name = key.replace(".weight", "")
+            print_layer_metrics(layer_name, tensor, casted_weight)
+    else:
+        quantized_state_dict[key] = tensor.cpu()
 
 def first_matching_qtype_for_key(key, rules):
     for r in rules:
@@ -77,39 +79,43 @@ def first_matching_qtype_for_key(key, rules):
             return qtype if qtype in ALLOWED_QTYPES else None
     return None
 
-
-
 def main():
     args = parse_args()
+    cast_to = {"bf16": torch.bfloat16, "fp16": torch.float16}.get(args.downcast_fp32, None)
+    assert ".json" in args.json, f"{args.json} is not .json file."
     with open(args.json, "r", encoding="utf-8") as f:
         config = json.load(f)
     qformat = config.get("format", "1.0")
-    block_name = config.get("block_name", "block")
+    block_names = config.get("block_names", ["block", "transformer", "layer"])
     rules = config.get("rules", [])
-    cast_to = torch.bfloat16 # temp
     
-    state_dict = load_file(args.src)
     quantized_state_dict, quantization_layers = {}, {}
-    
-    for key, tensor in state_dict.items():
-        if not (block_name in key and key.endswith(".weight") and tensor.dtype in QUANTIZABLE_WEIGHT_DTYPES and tensor.ndim == 2):
-            quantized_state_dict[key] = tensor.to(cast_to)
-#            quantized_state_dict[key] = tensor
-            continue
-        
-        qtype = first_matching_qtype_for_key(key, rules)
-        if qtype is None:
-            quantized_state_dict[key] = tensor.to(cast_to)
-#            quantized_state_dict[key] = tensor
-        else:
-            quantize_layer(tensor.to(device), key, quantized_state_dict, quantization_layers, qtype, qformat)
+    for f in args.src:
+        print(f)
+        state_dict = load_file(f)
 
+        if not args.quiet: print_layer_header()
     
+        for key, tensor in state_dict.items():
+            if not (any(b in key for b in block_names) and key.endswith(".weight")
+                    and tensor.dtype in QUANTIZABLE_WEIGHT_DTYPES and tensor.ndim == 2):
+                store_with_optional_downcast(tensor, key, quantized_state_dict, cast_to, verbose=not args.quiet)
+                continue
+
+            qtype = first_matching_qtype_for_key(key, rules)
+            if qtype is None:
+                store_with_optional_downcast(tensor, key, quantized_state_dict, cast_to, verbose=not args.quiet)
+            else:
+                quantize_weight(tensor.to(device), key, quantized_state_dict, quantization_layers, qtype, qformat, args.method, args.n_samples, verbose=not args.quiet)
+
     metadata = (
         {"_quantization_metadata": json.dumps({"format_version": "1.0", "layers": quantization_layers})}
         if qformat != "comfy_quant" else None
     )
-    save_file(quantized_state_dict, args.dst, metadata=metadata)
+    if not args.test:
+        save_file(quantized_state_dict, args.dst, metadata=metadata)
+        total_bytes = os.path.getsize(args.dst)
+        print(f"Output: {args.dst} ({round(total_bytes / (1024**3), 2)}GB)")
 
 if __name__ == "__main__":
     main()
