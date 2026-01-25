@@ -1,5 +1,5 @@
 diff --git a/comfy/ops.py b/comfy/ops.py
-index 415c39e9..d3620a84 100644
+index e406ba7e..3cebfbf1 100644
 --- a/comfy/ops.py
 +++ b/comfy/ops.py
 @@ -23,6 +23,7 @@ from comfy.cli_args import args, PerformanceFeature
@@ -10,7 +10,7 @@ index 415c39e9..d3620a84 100644
  
  def run_every_op():
      if torch.compiler.is_compiling():
-@@ -492,7 +493,6 @@ from .quant_ops import (
+@@ -494,7 +495,6 @@ from .quant_ops import (
      get_layout_class,
  )
  
@@ -18,7 +18,7 @@ index 415c39e9..d3620a84 100644
  def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_precision_mm=False, disabled=[]):
      class MixedPrecisionOps(manual_cast):
          _quant_config = quant_config
-@@ -543,6 +543,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
+@@ -545,6 +545,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
  
                  device = self.factory_kwargs["device"]
                  layer_name = prefix.rstrip('.')
@@ -26,7 +26,7 @@ index 415c39e9..d3620a84 100644
                  weight_key = f"{prefix}weight"
                  weight = state_dict.pop(weight_key, None)
                  if weight is None:
-@@ -571,6 +572,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
+@@ -573,6 +574,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
  
                      qconfig = QUANT_ALGOS[self.quant_format]
                      self.layout_type = qconfig["comfy_tensor_layout"]
@@ -34,7 +34,7 @@ index 415c39e9..d3620a84 100644
                      layout_cls = get_layout_class(self.layout_type)
  
                      # Load format-specific parameters
-@@ -680,6 +682,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
+@@ -682,6 +684,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                          scale = getattr(self, 'input_scale', None)
                          if scale is not None:
                              scale = comfy.model_management.cast_to_device(scale, input.device, None)
@@ -42,3 +42,20 @@ index 415c39e9..d3620a84 100644
                          input = QuantizedTensor.from_float(input_reshaped, self.layout_type, scale=scale)
  
                  output = self.forward_comfy_cast_weights(input)
+diff --git a/comfy/samplers.py b/comfy/samplers.py
+index 1989ef10..02dbc9f2 100755
+--- a/comfy/samplers.py
++++ b/comfy/samplers.py
+@@ -214,6 +214,12 @@ def _calc_cond_batch_outer(model: BaseModel, conds: list[list[dict]], x_in: torc
+     return executor.execute(model, conds, x_in, timestep, model_options)
+ 
+ def _calc_cond_batch(model: BaseModel, conds: list[list[dict]], x_in: torch.Tensor, timestep, model_options):
++    try:
++        from extra.calibration import set_timestep
++        set_timestep(timestep, model.model_sampling)
++    except ImportError:
++        pass
++
+     out_conds = []
+     out_counts = []
+     # separate conds by matching hooks
