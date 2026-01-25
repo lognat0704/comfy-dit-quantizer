@@ -15,12 +15,12 @@ def get_device():
 def get_metrics(original, quantized, global_scale=None, block_scales=None):
     if block_scales is not None and quantized.dtype == torch.uint8:
         assert global_scale is not None, "nvfp4 requires global_scale"
-        dequantized = ck.dequantize_nvfp4(quantized, global_scale, block_scales, original.dtype) # nvfp4
+        dequantized = ck.dequantize_nvfp4(quantized, global_scale, block_scales, output_type=torch.float32) # nvfp4
     elif quantized.dtype == torch.float8_e4m3fn:
         assert global_scale is not None, "fp8 requires global_scale"
-        dequantized = ck.dequantize_per_tensor_fp8(quantized, global_scale, original.dtype) # fp8
+        dequantized = ck.dequantize_per_tensor_fp8(quantized, global_scale, output_type=torch.float32) # fp8
     else:
-        dequantized = quantized.to(dtype=original.dtype)
+        dequantized = quantized.to(dtype=torch.float32)
 
     amax = torch.amax(original.abs()).to(dtype=torch.float32)
     mse = torch.mean((original - dequantized).pow(2))
@@ -46,4 +46,4 @@ def print_layer_header():
 def print_layer_metrics(layer_name, original, quantized, global_scale=None, block_scales=None):
     mse, sqnr, psnr, cos_sim, max_err, rel_max_err, amax = get_metrics(original, quantized, global_scale, block_scales)
     gs = f"{fixed_e(global_scale, 4, 3):>10}" if global_scale !=None else f"{'':>10}"
-    print(f"{layer_name:<35} {str(quantized.dtype).partition('.')[2][:10]:>10} {gs} {fixed_e(mse, 4, 3):>10} {psnr:>6.4f} {sqnr:>6.4f} {cos_sim*100:8.4f} {rel_max_err*100:>8.4f}")
+    print(f"{layer_name:<35} {str(quantized.dtype).partition('.')[2][:10]:>10} {gs} {fixed_e(mse, 6, 3):>10} {psnr:>6.4f} {sqnr:>6.4f} {cos_sim*100:8.4f} {rel_max_err*100:>8.4f}")
