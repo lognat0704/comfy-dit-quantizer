@@ -67,10 +67,16 @@ def main():
             input_scale = _input_scale_from_format(qfmt, float(value))
             out_tensors[f"{layer_name}.input_scale"] = torch.tensor(input_scale, dtype=torch.float32)
 
+            # Get weight_scale if it exists (FP8 layers may not have weight_scale)
             scale_key = f"{layer_name}.weight_scale_2" if qfmt == "nvfp4" else f"{layer_name}.weight_scale"
-            weight_scale = out_tensors[scale_key].item()
-            print(f"[{layer_name.partition('.')[2]:<25} {qfmt[:6]:>6}]",
-                  f"weight_scale={weight_scale:.4}, input_scale={input_scale:.4} diff={input_scale / weight_scale:.4f}")
+            if scale_key in out_tensors:
+                weight_scale = out_tensors[scale_key].item()
+                print(f"[{layer_name.partition('.')[2]:<25} {qfmt[:6]:>6}]",
+                      f"weight_scale={weight_scale:.4}, input_scale={input_scale:.4} diff={input_scale / weight_scale:.4f}")
+            else:
+                # FP8 layers without weight_scale - use 1.0 as implicit scale
+                print(f"[{layer_name.partition('.')[2]:<25} {qfmt[:6]:>6}]",
+                      f"weight_scale=1.0 (implicit), input_scale={input_scale:.4}")
 
     save_file(out_tensors, output_path, metadata=metadata)
 
